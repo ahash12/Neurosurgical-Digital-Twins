@@ -9,6 +9,7 @@ scikit-learn
 scipy
 simpleitk
 torch
+TotalSegmentator
 vedo
 vtk
 # torch base on the cuda version https://pytorch.org/get-started/previous-versions/

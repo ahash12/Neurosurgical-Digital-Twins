@@ -70,8 +70,14 @@ Train/evaluate the stage 1 model variants:
 # Four-class stage 1 model: none / blastic / lytic / mixed
 python -m pipeline.scripts.stage1_cancer
 
-# Binary stage 1 model: none / cancer
+# Binary stage 1: shared CT-or-MRI model (requires reviewed MRI GT)
 python -m pipeline.scripts.stage1a_binary
+
+# CT-only model benchmark with patient-grouped cross-validation
+python -m pipeline.scripts.stage1a_binary --experiment ct_cv
+
+# Original CT DenseNet holdout experiment
+python -m pipeline.scripts.stage1a_binary --experiment ct_holdout
 
 # Cancer-type stage 1 model: blastic / lytic / mixed
 python -m pipeline.scripts.stage1b_type

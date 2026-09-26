@@ -26,7 +26,7 @@ from pipeline.core.stage1_multimodal import (
     load_mri_samples,
     validate_samples,
 )
-from pipeline.scripts.stage1a_multimodal import (
+from pipeline.training.stage1a_multimodal import (
     evaluate_metrics,
     run_epoch,
     sampling_weights,
