@@ -79,6 +79,9 @@ def normalize_stage1_patch(ct_patch, mask, norm_mode="zscore_sigmoid", zscore_sc
         z = (ct_patch - mu) / (sigma * max(float(zscore_scale), 1e-6))
         z = np.clip(z, -12.0, 12.0)
         out = (1.0 / (1.0 + np.exp(-z))).astype(np.float32)
+    elif norm_mode == "ct_hu_window":
+        out = ((ct_patch + 200.0) / 1200.0).astype(np.float32)
+        out = np.clip(out, 0.0, 1.0)
     else:
         raise ValueError(f"Unknown norm_mode: {norm_mode}")
 
@@ -105,7 +108,8 @@ def build_stage1_patch_and_mask(
     seg_bin = np.where(seg == label, 1.0, 0.0)
     ct_patch = extract_centered_label_cube(ct, seg, label, size=tuple(patch_size))[0].astype(np.float32)
     mask = extract_centered_label_cube(seg_bin, seg, label, size=tuple(patch_size))[0] > 0.5
-    ct_patch = np.clip(ct_patch, -200.0, 1000.0)
+    if norm_mode != "robust_minmax":
+        ct_patch = np.clip(ct_patch, -200.0, 1000.0)
     patch = normalize_stage1_patch(
         ct_patch,
         mask,
@@ -189,7 +193,8 @@ def build_stage1_patch_mask_and_coords(
     coord_src = np.moveaxis(local_grid, 0, -1)
     coord_patch[dst_slices[0], dst_slices[1], dst_slices[2]] = coord_src[src_slices[0], src_slices[1], src_slices[2]]
 
-    ct_patch = np.clip(ct_patch, -200.0, 1000.0)
+    if norm_mode != "robust_minmax":
+        ct_patch = np.clip(ct_patch, -200.0, 1000.0)
     patch = normalize_stage1_patch(
         ct_patch,
         mask_patch,

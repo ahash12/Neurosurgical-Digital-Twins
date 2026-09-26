@@ -5,9 +5,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import matplotlib.pyplot as plt
 import torch
@@ -26,7 +24,10 @@ from dataset_class import (
 )
 from monai.networks.nets import DenseNet121
 
-DATA_ROOT = resolve_dataset_root()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_ROOT = resolve_dataset_root(
+    default=str(PROJECT_ROOT.parent.parent / "datasets" / "radiel")
+)
 CSV_PATH = DATA_ROOT / "vertebra_dataset.csv"
 ROOT_DIR = DATA_ROOT / "Spine-Mets-CT-SEG-Nifti"
 INCLUDE_ARCHIVE_GT = True
@@ -44,7 +45,7 @@ TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 USE_WEIGHTED_SAMPLER = False
 USE_CLASS_WEIGHTS = True
-USE_FOCAL_LOSS = False
+USE_FOCAL_LOSS = True
 FOCAL_GAMMA = 2.0
 SPLIT_SEARCH_TRIALS = 5000
 SEED = 42
@@ -66,7 +67,7 @@ AUG_INTENSITY_SCALE = 0.08
 AUG_INTENSITY_SHIFT = 0.04
 
 RUN_DATE = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-OUTPUT_DIR = Path("output/stage1/cancer_type") / RUN_DATE
+OUTPUT_DIR = Path("output/stage1/2_class") / RUN_DATE
 BEST_MODEL_PATH = OUTPUT_DIR / "best.pth"
 LAST_MODEL_PATH = OUTPUT_DIR / "last.pth"
 HISTORY_PATH = OUTPUT_DIR / "history.csv"
@@ -86,30 +87,23 @@ TEST_REPORT_JSON_PATH = OUTPUT_DIR / "test_classification_report.json"
 TEST_PREDICTIONS_PATH = OUTPUT_DIR / "test_predictions.csv"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CLASS_NAMES = ["blastic", "lytic", "mixed"]
+CLASS_NAMES = ["none", "cancer"]
 NUM_CLASSES = len(CLASS_NAMES)
 SPLIT_MODE = "patient_balanced"
-TYPE_MAP = {1: 0, 2: 1, 3: 2}
 
 
-class CancerTypeDataset(Dataset):
+class BinaryVertebraDataset(Dataset):
     def __init__(self, base_dataset):
         self.base = base_dataset
-        self.indices = [
-            i
-            for i, label in enumerate(base_dataset.df["label"].astype(int).tolist())
-            if label > 0
-        ]
-        self.df = base_dataset.df.iloc[self.indices].copy().reset_index(drop=True)
-        self.df["label"] = self.df["label"].astype(int).map(TYPE_MAP)
+        self.df = base_dataset.df.copy()
+        self.df["label"] = (self.df["label"].astype(int) > 0).astype(int)
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.base)
 
     def __getitem__(self, idx):
-        base_idx = self.indices[idx]
-        patch, label = self.base[base_idx]
-        return patch, torch.tensor(TYPE_MAP[int(label)], dtype=torch.long)
+        patch, label = self.base[idx]
+        return patch, torch.tensor(0 if int(label) == 0 else 1, dtype=torch.long)
 
 
 class FocalLoss(nn.Module):
@@ -127,7 +121,9 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def build_patient_balanced_splits(dataset, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO, seed=SEED):
+def build_patient_balanced_splits(
+    dataset, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO, seed=SEED
+):
     patients = []
     for pid, group in dataset.df.groupby("patient_id", sort=False):
         counts = torch.zeros(NUM_CLASSES, dtype=torch.float32)
@@ -141,9 +137,6 @@ def build_patient_balanced_splits(dataset, train_ratio=TRAIN_RATIO, val_ratio=VA
                 "size": len(group),
             }
         )
-
-    if len(patients) < 3:
-        raise ValueError("Need at least 3 cancer-positive patients for patient-level train/val/test splits.")
 
     n_total = len(patients)
     n_train = max(1, int(round(n_total * train_ratio)))
@@ -168,8 +161,10 @@ def build_patient_balanced_splits(dataset, train_ratio=TRAIN_RATIO, val_ratio=VA
             for patient in group:
                 counts += patient["counts"]
             target = target_counts[split_name]
-            score += torch.sum(torch.abs(counts - target) / torch.clamp(target, min=1.0)).item()
-            for class_id in range(NUM_CLASSES):
+            score += torch.sum(
+                torch.abs(counts - target) / torch.clamp(target, min=1.0)
+            ).item()
+            for class_id in range(1, NUM_CLASSES):
                 if total_counts[class_id] > 0 and counts[class_id] == 0:
                     score += 25.0 if split_name == "train" else 5.0
         return score
@@ -182,8 +177,8 @@ def build_patient_balanced_splits(dataset, train_ratio=TRAIN_RATIO, val_ratio=VA
         ordered = [patients[i] for i in order]
         groups = {
             "train": ordered[:n_train],
-            "val": ordered[n_train:n_train + n_val],
-            "test": ordered[n_train + n_val:],
+            "val": ordered[n_train : n_train + n_val],
+            "test": ordered[n_train + n_val :],
         }
         score = candidate_score(groups)
         if score < best_score:
@@ -350,9 +345,13 @@ def save_classification_report(y_true, y_pred, txt_path, json_path):
         json.dump(report_json, f, indent=2)
 
 
-def save_split_reports(metrics, confusion_path, report_path, report_json_path, split_name):
+def save_split_reports(
+    metrics, confusion_path, report_path, report_json_path, split_name
+):
     save_confusion_matrix_csv(metrics["confusion_matrix"], confusion_path)
-    save_classification_report(metrics["y_true"], metrics["y_pred"], report_path, report_json_path)
+    save_classification_report(
+        metrics["y_true"], metrics["y_pred"], report_path, report_json_path
+    )
     print(f"Saved {split_name} confusion matrix: {confusion_path}")
     print(f"Saved {split_name} classification report: {report_path}")
 
@@ -401,7 +400,9 @@ def build_base_dataset():
         source="original",
     )
     removed = original_dataset.exclude_patients(EXCLUDED_PATIENT_IDS)
-    print(f"Excluded {removed} rows from known invalid patients: {sorted(EXCLUDED_PATIENT_IDS)}")
+    print(
+        f"Excluded {removed} rows from known invalid patients: {sorted(EXCLUDED_PATIENT_IDS)}"
+    )
     datasets = [original_dataset]
     if INCLUDE_ARCHIVE_GT:
         build_archive_stage1_labels(
@@ -430,221 +431,268 @@ def build_base_dataset():
     return CombinedVertebraDataset(datasets), datasets
 
 
-base_dataset, source_datasets = build_base_dataset()
-dataset = CancerTypeDataset(base_dataset)
+def main() -> None:
+    base_dataset, source_datasets = build_base_dataset()
+    dataset = BinaryVertebraDataset(base_dataset)
 
-if PREBUILD_PATCH_CACHE and USE_PATCH_CACHE:
-    for source_dataset in source_datasets:
-        start_time = datetime.now()
-        print(f"Precomputing patch cache -> {source_dataset.cache_dir}")
-        source_dataset.precompute_cache(
-            force=False,
-            verbose=True,
-            num_workers=PATCH_CACHE_WORKERS,
+    if PREBUILD_PATCH_CACHE and USE_PATCH_CACHE:
+        for source_dataset in source_datasets:
+            start_time = datetime.now()
+            print(f"Precomputing patch cache -> {source_dataset.cache_dir}")
+            source_dataset.precompute_cache(
+                force=False,
+                verbose=True,
+                num_workers=PATCH_CACHE_WORKERS,
+            )
+            print(f"Precomputation time: {datetime.now() - start_time}")
+
+    train_idx, val_idx, test_idx = build_patient_balanced_splits(dataset)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    train_set: Subset | TransformedDataset = Subset(dataset, train_idx)
+    val_set = Subset(dataset, val_idx)
+    test_set = Subset(dataset, test_idx)
+
+    train_transform = (
+        Stage1PatchAugmentation(
+            flip_probability=AUG_FLIP_PROBABILITY,
+            noise_std=AUG_NOISE_STD,
+            intensity_scale=AUG_INTENSITY_SCALE,
+            intensity_shift=AUG_INTENSITY_SHIFT,
         )
-        print(f"Precomputation time: {datetime.now() - start_time}")
-
-train_idx, val_idx, test_idx = build_patient_balanced_splits(dataset)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-train_set = Subset(dataset, train_idx)
-val_set = Subset(dataset, val_idx)
-test_set = Subset(dataset, test_idx)
-
-train_transform = (
-    Stage1PatchAugmentation(
-        flip_probability=AUG_FLIP_PROBABILITY,
-        noise_std=AUG_NOISE_STD,
-        intensity_scale=AUG_INTENSITY_SCALE,
-        intensity_shift=AUG_INTENSITY_SHIFT,
+        if USE_TRAIN_AUGMENTATION
+        else None
     )
-    if USE_TRAIN_AUGMENTATION
-    else None
-)
-if train_transform is not None:
-    train_set = TransformedDataset(train_set, transform=train_transform)
+    if train_transform is not None:
+        train_set = TransformedDataset(train_set, transform=train_transform)
 
-if USE_WEIGHTED_SAMPLER:
-    train_loader = make_weighted_train_loader(dataset, train_idx, transform=train_transform)
-else:
-    train_loader = make_loader(train_set, shuffle=True)
-eval_train_loader = make_loader(Subset(dataset, train_idx), shuffle=False)
-val_loader = make_loader(val_set, shuffle=False)
-test_loader = make_loader(test_set, shuffle=False)
+    if USE_WEIGHTED_SAMPLER:
+        train_loader = make_weighted_train_loader(
+            dataset, train_idx, transform=train_transform
+        )
+    else:
+        train_loader = make_loader(train_set, shuffle=True)
+    eval_train_loader = make_loader(Subset(dataset, train_idx), shuffle=False)
+    val_loader = make_loader(val_set, shuffle=False)
+    test_loader = make_loader(test_set, shuffle=False)
 
-print(f"Device: {DEVICE}")
-print(f"Split mode: {SPLIT_MODE}")
-print(f"Weighted sampler: {USE_WEIGHTED_SAMPLER}")
-print(f"Class weights: {USE_CLASS_WEIGHTS}")
-print(f"Focal loss: {USE_FOCAL_LOSS}")
-print(f"Train augmentation: {USE_TRAIN_AUGMENTATION}")
-print(f"Count: train - {len(train_set)} val - {len(val_set)} test - {len(test_set)}")
-print(f"Train label counts: {label_counts(dataset.df, train_idx)}")
-print(f"Val label counts:   {label_counts(dataset.df, val_idx)}")
-print(f"Test label counts:  {label_counts(dataset.df, test_idx)}")
-print(f"Source counts: {dict(Counter(dataset.df['source'].astype(str).tolist()))}")
-print(f"Output dir: {OUTPUT_DIR}")
-
-class_weights, train_counts = compute_class_weights(dataset.df, train_idx)
-print(f"Class weights (train): {class_weights.tolist()}")
-
-params = {
-    "csv_path": str(CSV_PATH),
-    "root_dir": str(ROOT_DIR),
-    "include_archive_gt": INCLUDE_ARCHIVE_GT,
-    "archive_gt_path": str(ARCHIVE_GT_PATH),
-    "archive_root_dir": str(ARCHIVE_ROOT_DIR),
-    "archive_csv_path": str(ARCHIVE_CSV_PATH),
-    "archive_mapping_path": str(ARCHIVE_MAPPING_PATH),
-    "archive_require_segmentation": ARCHIVE_REQUIRE_SEGMENTATION,
-    "excluded_patient_ids": sorted(EXCLUDED_PATIENT_IDS),
-    "batch_size": BATCH_SIZE,
-    "epochs": EPOCHS,
-    "lr": LR,
-    "split_mode": SPLIT_MODE,
-    "use_weighted_sampler": USE_WEIGHTED_SAMPLER,
-    "use_class_weights": USE_CLASS_WEIGHTS,
-    "use_focal_loss": USE_FOCAL_LOSS,
-    "focal_gamma": FOCAL_GAMMA,
-    "use_train_augmentation": USE_TRAIN_AUGMENTATION,
-    "patch_size": list(PATCH_SIZE),
-    "norm_mode": NORM_MODE,
-    "zscore_scale": ZSCORE_SCALE,
-    "foreground_floor": FOREGROUND_FLOOR,
-    "cache_version": STAGE1_CACHE_VERSION,
-    "train_label_counts": label_counts(dataset.df, train_idx),
-    "val_label_counts": label_counts(dataset.df, val_idx),
-    "test_label_counts": label_counts(dataset.df, test_idx),
-    "train_source_label_counts": split_source_label_counts(dataset.df, train_idx),
-    "val_source_label_counts": split_source_label_counts(dataset.df, val_idx),
-    "test_source_label_counts": split_source_label_counts(dataset.df, test_idx),
-    "train_patient_ids": split_patient_ids(dataset.df, train_idx),
-    "val_patient_ids": split_patient_ids(dataset.df, val_idx),
-    "test_patient_ids": split_patient_ids(dataset.df, test_idx),
-    "source_counts": dict(Counter(dataset.df["source"].astype(str).tolist())),
-    "class_weights": [float(x) for x in class_weights.tolist()],
-    "class_count_vector": [int(x) for x in train_counts.tolist()],
-}
-with open(PARAMS_PATH, "w") as f:
-    json.dump(params, f, indent=2)
-
-model = DenseNet121(spatial_dims=3, in_channels=1, out_channels=NUM_CLASSES).to(DEVICE)
-if USE_FOCAL_LOSS:
-    alpha = class_weights.to(DEVICE) if USE_CLASS_WEIGHTS else None
-    criterion = FocalLoss(alpha=alpha, gamma=FOCAL_GAMMA)
-else:
-    weight = class_weights.to(DEVICE) if USE_CLASS_WEIGHTS else None
-    criterion = nn.CrossEntropyLoss(weight=weight)
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-
-history = []
-best_val_loss = float("inf")
-best_val_f1 = float("-inf")
-best_epoch = 0
-
-for epoch in range(1, EPOCHS + 1):
-    train_metrics = run_epoch(model, train_loader, criterion, optimizer=optimizer)
-    val_metrics = run_epoch(model, val_loader, criterion, optimizer=None)
-    history.append(
-        {
-            "epoch": epoch,
-            "train_loss": train_metrics["loss"],
-            "train_acc": train_metrics["acc"],
-            "train_f1": train_metrics["f1"],
-            "val_loss": val_metrics["loss"],
-            "val_acc": val_metrics["acc"],
-            "val_f1": val_metrics["f1"],
-        }
-    )
+    print(f"Device: {DEVICE}")
+    print(f"Split mode: {SPLIT_MODE}")
+    print(f"Weighted sampler: {USE_WEIGHTED_SAMPLER}")
+    print(f"Class weights: {USE_CLASS_WEIGHTS}")
+    print(f"Focal loss: {USE_FOCAL_LOSS}")
+    print(f"Train augmentation: {USE_TRAIN_AUGMENTATION}")
     print(
-        f"Epoch {epoch:02d} | train_loss={train_metrics['loss']:.4f} train_acc={train_metrics['acc']:.4f} "
-        f"train_f1={train_metrics['f1']:.4f} | val_loss={val_metrics['loss']:.4f} "
-        f"val_acc={val_metrics['acc']:.4f} val_f1={val_metrics['f1']:.4f} | "
-        f"val_pred={val_metrics['pred_counts']}"
+        f"Count: train - {len(train_set)} val - {len(val_set)} test - {len(test_set)}"
     )
-    if val_metrics["f1"] > best_val_f1 or (val_metrics["f1"] == best_val_f1 and val_metrics["loss"] < best_val_loss):
-        best_val_f1 = val_metrics["f1"]
-        best_val_loss = val_metrics["loss"]
-        best_epoch = epoch
-        torch.save(
+    print(f"Train label counts: {label_counts(dataset.df, train_idx)}")
+    print(f"Val label counts:   {label_counts(dataset.df, val_idx)}")
+    print(f"Test label counts:  {label_counts(dataset.df, test_idx)}")
+    print(f"Source counts: {dict(Counter(dataset.df['source'].astype(str).tolist()))}")
+    print(f"Output dir: {OUTPUT_DIR}")
+
+    class_weights, train_counts = compute_class_weights(dataset.df, train_idx)
+    print(f"Class weights (train): {class_weights.tolist()}")
+
+    params = {
+        "csv_path": str(CSV_PATH),
+        "root_dir": str(ROOT_DIR),
+        "include_archive_gt": INCLUDE_ARCHIVE_GT,
+        "archive_gt_path": str(ARCHIVE_GT_PATH),
+        "archive_root_dir": str(ARCHIVE_ROOT_DIR),
+        "archive_csv_path": str(ARCHIVE_CSV_PATH),
+        "archive_mapping_path": str(ARCHIVE_MAPPING_PATH),
+        "archive_require_segmentation": ARCHIVE_REQUIRE_SEGMENTATION,
+        "excluded_patient_ids": sorted(EXCLUDED_PATIENT_IDS),
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "split_mode": SPLIT_MODE,
+        "use_weighted_sampler": USE_WEIGHTED_SAMPLER,
+        "use_class_weights": USE_CLASS_WEIGHTS,
+        "use_focal_loss": USE_FOCAL_LOSS,
+        "focal_gamma": FOCAL_GAMMA,
+        "use_train_augmentation": USE_TRAIN_AUGMENTATION,
+        "patch_size": list(PATCH_SIZE),
+        "norm_mode": NORM_MODE,
+        "zscore_scale": ZSCORE_SCALE,
+        "foreground_floor": FOREGROUND_FLOOR,
+        "cache_version": STAGE1_CACHE_VERSION,
+        "train_label_counts": label_counts(dataset.df, train_idx),
+        "val_label_counts": label_counts(dataset.df, val_idx),
+        "test_label_counts": label_counts(dataset.df, test_idx),
+        "train_source_label_counts": split_source_label_counts(dataset.df, train_idx),
+        "val_source_label_counts": split_source_label_counts(dataset.df, val_idx),
+        "test_source_label_counts": split_source_label_counts(dataset.df, test_idx),
+        "train_patient_ids": split_patient_ids(dataset.df, train_idx),
+        "val_patient_ids": split_patient_ids(dataset.df, val_idx),
+        "test_patient_ids": split_patient_ids(dataset.df, test_idx),
+        "source_counts": dict(Counter(dataset.df["source"].astype(str).tolist())),
+        "class_weights": [float(x) for x in class_weights.tolist()],
+        "class_count_vector": [int(x) for x in train_counts.tolist()],
+    }
+    with open(PARAMS_PATH, "w") as f:
+        json.dump(params, f, indent=2)
+
+    model = DenseNet121(spatial_dims=3, in_channels=1, out_channels=NUM_CLASSES).to(
+        DEVICE
+    )
+    criterion: nn.Module
+    if USE_FOCAL_LOSS:
+        alpha = class_weights.to(DEVICE) if USE_CLASS_WEIGHTS else None
+        criterion = FocalLoss(alpha=alpha, gamma=FOCAL_GAMMA)
+    else:
+        weight = class_weights.to(DEVICE) if USE_CLASS_WEIGHTS else None
+        criterion = nn.CrossEntropyLoss(weight=weight)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+    history = []
+    best_val_loss = float("inf")
+    best_val_f1 = float("-inf")
+    best_epoch = 0
+
+    for epoch in range(1, EPOCHS + 1):
+        train_metrics = run_epoch(model, train_loader, criterion, optimizer=optimizer)
+        val_metrics = run_epoch(model, val_loader, criterion, optimizer=None)
+        history.append(
             {
                 "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "best_val_loss": best_val_loss,
-                "best_val_f1": best_val_f1,
-            },
-            BEST_MODEL_PATH,
+                "train_loss": train_metrics["loss"],
+                "train_acc": train_metrics["acc"],
+                "train_f1": train_metrics["f1"],
+                "val_loss": val_metrics["loss"],
+                "val_acc": val_metrics["acc"],
+                "val_f1": val_metrics["f1"],
+            }
         )
         print(
-            f"Saved new best model at epoch {epoch} "
-            f"(val_f1={best_val_f1:.4f}, val_loss={best_val_loss:.4f}) -> {BEST_MODEL_PATH}"
+            f"Epoch {epoch:02d} | train_loss={train_metrics['loss']:.4f} train_acc={train_metrics['acc']:.4f} "
+            f"train_f1={train_metrics['f1']:.4f} | val_loss={val_metrics['loss']:.4f} "
+            f"val_acc={val_metrics['acc']:.4f} val_f1={val_metrics['f1']:.4f} | "
+            f"val_pred={val_metrics['pred_counts']}"
         )
+        if val_metrics["f1"] > best_val_f1 or (
+            val_metrics["f1"] == best_val_f1 and val_metrics["loss"] < best_val_loss
+        ):
+            best_val_f1 = val_metrics["f1"]
+            best_val_loss = val_metrics["loss"]
+            best_epoch = epoch
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_val_loss": best_val_loss,
+                    "best_val_f1": best_val_f1,
+                },
+                BEST_MODEL_PATH,
+            )
+            print(
+                f"Saved new best model at epoch {epoch} "
+                f"(val_f1={best_val_f1:.4f}, val_loss={best_val_loss:.4f}) -> {BEST_MODEL_PATH}"
+            )
 
-with open(HISTORY_PATH, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "train_acc", "train_f1", "val_loss", "val_acc", "val_f1"])
-    writer.writeheader()
-    writer.writerows(history)
-print(f"Saved history: {HISTORY_PATH}")
+    with open(HISTORY_PATH, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "epoch",
+                "train_loss",
+                "train_acc",
+                "train_f1",
+                "val_loss",
+                "val_acc",
+                "val_f1",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(history)
+    print(f"Saved history: {HISTORY_PATH}")
 
-torch.save(
-    {
-        "epoch": EPOCHS,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "best_val_loss": best_val_loss,
-        "best_val_f1": best_val_f1,
-    },
-    LAST_MODEL_PATH,
-)
-print(f"Saved last model: {LAST_MODEL_PATH}")
+    torch.save(
+        {
+            "epoch": EPOCHS,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_val_loss": best_val_loss,
+            "best_val_f1": best_val_f1,
+        },
+        LAST_MODEL_PATH,
+    )
+    print(f"Saved last model: {LAST_MODEL_PATH}")
 
-epochs = [r["epoch"] for r in history]
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-axes[0].plot(epochs, [r["train_loss"] for r in history], label="train")
-axes[0].plot(epochs, [r["val_loss"] for r in history], label="val")
-axes[0].set_title("Loss")
-axes[0].legend()
-axes[1].plot(epochs, [r["train_acc"] for r in history], label="train")
-axes[1].plot(epochs, [r["val_acc"] for r in history], label="val")
-axes[1].set_title("Accuracy")
-axes[1].legend()
-axes[2].plot(epochs, [r["train_f1"] for r in history], label="train")
-axes[2].plot(epochs, [r["val_f1"] for r in history], label="val")
-axes[2].set_title("Macro F1")
-axes[2].legend()
-fig.tight_layout()
-fig.savefig(CURVES_PATH, dpi=140)
-plt.close(fig)
-print(f"Saved curves: {CURVES_PATH}")
+    epochs = [r["epoch"] for r in history]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    axes[0].plot(epochs, [r["train_loss"] for r in history], label="train")
+    axes[0].plot(epochs, [r["val_loss"] for r in history], label="val")
+    axes[0].set_title("Loss")
+    axes[0].legend()
+    axes[1].plot(epochs, [r["train_acc"] for r in history], label="train")
+    axes[1].plot(epochs, [r["val_acc"] for r in history], label="val")
+    axes[1].set_title("Accuracy")
+    axes[1].legend()
+    axes[2].plot(epochs, [r["train_f1"] for r in history], label="train")
+    axes[2].plot(epochs, [r["val_f1"] for r in history], label="val")
+    axes[2].set_title("Macro F1")
+    axes[2].legend()
+    fig.tight_layout()
+    fig.savefig(CURVES_PATH, dpi=140)
+    plt.close(fig)
+    print(f"Saved curves: {CURVES_PATH}")
 
-if BEST_MODEL_PATH.exists():
-    ckpt = torch.load(BEST_MODEL_PATH, map_location=DEVICE)
-    model.load_state_dict(ckpt["model_state_dict"])
+    if BEST_MODEL_PATH.exists():
+        ckpt = torch.load(BEST_MODEL_PATH, map_location=DEVICE)
+        model.load_state_dict(ckpt["model_state_dict"])
 
-train_metrics = run_epoch(model, eval_train_loader, criterion, optimizer=None, collect_predictions=True)
-val_metrics = run_epoch(model, val_loader, criterion, optimizer=None, collect_predictions=True)
-test_metrics = run_epoch(model, test_loader, criterion, optimizer=None, collect_predictions=True)
+    train_metrics = run_epoch(
+        model, eval_train_loader, criterion, optimizer=None, collect_predictions=True
+    )
+    val_metrics = run_epoch(
+        model, val_loader, criterion, optimizer=None, collect_predictions=True
+    )
+    test_metrics = run_epoch(
+        model, test_loader, criterion, optimizer=None, collect_predictions=True
+    )
 
-save_split_reports(train_metrics, TRAIN_CONFUSION_PATH, TRAIN_REPORT_PATH, TRAIN_REPORT_JSON_PATH, "train")
-save_split_reports(val_metrics, VAL_CONFUSION_PATH, VAL_REPORT_PATH, VAL_REPORT_JSON_PATH, "best-val")
-save_split_reports(test_metrics, TEST_CONFUSION_PATH, TEST_REPORT_PATH, TEST_REPORT_JSON_PATH, "test")
-save_prediction_csv(dataset, train_idx, train_metrics, TRAIN_PREDICTIONS_PATH)
-save_prediction_csv(dataset, val_idx, val_metrics, VAL_PREDICTIONS_PATH)
-save_prediction_csv(dataset, test_idx, test_metrics, TEST_PREDICTIONS_PATH)
-print(f"Test metrics | loss={test_metrics['loss']:.4f} acc={test_metrics['acc']:.4f} f1={test_metrics['f1']:.4f}")
+    save_split_reports(
+        train_metrics,
+        TRAIN_CONFUSION_PATH,
+        TRAIN_REPORT_PATH,
+        TRAIN_REPORT_JSON_PATH,
+        "train",
+    )
+    save_split_reports(
+        val_metrics,
+        VAL_CONFUSION_PATH,
+        VAL_REPORT_PATH,
+        VAL_REPORT_JSON_PATH,
+        "best-val",
+    )
+    save_split_reports(
+        test_metrics,
+        TEST_CONFUSION_PATH,
+        TEST_REPORT_PATH,
+        TEST_REPORT_JSON_PATH,
+        "test",
+    )
+    save_prediction_csv(dataset, train_idx, train_metrics, TRAIN_PREDICTIONS_PATH)
+    save_prediction_csv(dataset, val_idx, val_metrics, VAL_PREDICTIONS_PATH)
+    save_prediction_csv(dataset, test_idx, test_metrics, TEST_PREDICTIONS_PATH)
+    print(
+        f"Test metrics | loss={test_metrics['loss']:.4f} acc={test_metrics['acc']:.4f} f1={test_metrics['f1']:.4f}"
+    )
 
-params["best_val_loss"] = best_val_loss
-params["best_val_f1"] = best_val_f1
-params["best_epoch"] = best_epoch
-params["train_loss"] = train_metrics["loss"]
-params["train_acc"] = train_metrics["acc"]
-params["train_f1"] = train_metrics["f1"]
-params["val_loss_at_best"] = val_metrics["loss"]
-params["val_acc_at_best"] = val_metrics["acc"]
-params["val_f1_at_best"] = val_metrics["f1"]
-params["test_loss"] = test_metrics["loss"]
-params["test_acc"] = test_metrics["acc"]
-params["test_f1"] = test_metrics["f1"]
-with open(PARAMS_PATH, "w") as f:
-    json.dump(params, f, indent=2)
+    params["best_val_loss"] = best_val_loss
+    params["best_val_f1"] = best_val_f1
+    params["best_epoch"] = best_epoch
+    params["train_loss"] = train_metrics["loss"]
+    params["train_acc"] = train_metrics["acc"]
+    params["train_f1"] = train_metrics["f1"]
+    params["val_loss_at_best"] = val_metrics["loss"]
+    params["val_acc_at_best"] = val_metrics["acc"]
+    params["val_f1_at_best"] = val_metrics["f1"]
+    params["test_loss"] = test_metrics["loss"]
+    params["test_acc"] = test_metrics["acc"]
+    params["test_f1"] = test_metrics["f1"]
+    with open(PARAMS_PATH, "w") as f:
+        json.dump(params, f, indent=2)

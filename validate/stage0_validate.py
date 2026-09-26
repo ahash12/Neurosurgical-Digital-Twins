@@ -5,16 +5,22 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 from nibabel.processing import resample_from_to
-from vedo import Sphere, Text2D, Volume, show
+from vedo import Plotter, Sphere, Text2D, Volume, show
 
 from read_data_nifti import _load_ct_and_seg_aligned
-from utils import DEFAULT_DATA_ROOT, VERTEBRA_LABELS, load_img, load_seg, vox2world
+from utils import (
+    DEFAULT_DATA_ROOT,
+    STAGE0_VERTEBRA_LABELS,
+    VERTEBRA_LABELS,
+    load_seg,
+    vox2world,
+)
 
 
 DEFAULT_TS_ROOT = "output/stage0"
 TS_NAME_MAP = {
     name: [f"vertebrae_{name}.nii.gz", f"{name}.nii.gz", f"vertebra_{name}.nii.gz"]
-    for name in VERTEBRA_LABELS
+    for name in STAGE0_VERTEBRA_LABELS
 }
 
 
@@ -36,7 +42,140 @@ def parse_args():
     parser.add_argument("--ct-ww", type=float, default=1500.0, help="CT window width for context coloring.")
     parser.add_argument("--show", action="store_true", help="Open patient-wise vedo visualization.")
     parser.add_argument("--save-csv", type=str, default="", help="Optional CSV path for all-patient metrics.")
+    parser.add_argument("--check-output", action="store_true", help="Check generated vertebra masks without requiring ground truth.")
+    parser.add_argument("--show-output", action="store_true", help="Show generated vertebra masks over the source CT or MRI volume.")
     return parser.parse_args()
+
+
+def inspect_stage0_output(patient_id, ts_dir, seg_path=None):
+    ts_dir = Path(ts_dir)
+    if not ts_dir.exists():
+        raise FileNotFoundError(f"TotalSegmentator output dir not found: {ts_dir}")
+
+    combined = None
+    if seg_path:
+        seg_path = Path(seg_path)
+        if not seg_path.exists():
+            raise FileNotFoundError(f"Combined segmentation not found: {seg_path}")
+        combined, _ = load_seg(str(seg_path))
+
+    rows = []
+    for vertebra, label in STAGE0_VERTEBRA_LABELS.items():
+        mask, _, path = load_ts_mask(ts_dir, vertebra)
+        mask_voxels = 0 if mask is None else int(np.count_nonzero(mask))
+        combined_voxels = 0 if combined is None else int(np.count_nonzero(combined == label))
+        if mask_voxels == 0 and combined_voxels == 0:
+            continue
+        rows.append({
+            "patient_id": str(patient_id),
+            "vertebra": vertebra,
+            "mask_voxels": mask_voxels,
+            "combined_voxels": combined_voxels,
+            "mask_file": "" if path is None else str(path),
+        })
+    return pd.DataFrame(rows)
+
+
+def resolve_patient_image(patient_id, root_dir):
+    patient_dir = Path(root_dir) / patient_id
+    candidates = [
+        (patient_dir / f"{patient_id}_ct.nii.gz", "CT"),
+        (patient_dir / f"{patient_id}_mr.nii.gz", "MR"),
+    ]
+    matches = [(path, modality) for path, modality in candidates if path.exists()]
+    if not matches:
+        raise FileNotFoundError(f"CT or MRI source image not found in: {patient_dir}")
+    if len(matches) > 1:
+        raise ValueError(f"Multiple source images found in: {patient_dir}")
+    return matches[0]
+
+
+def attach_review_navigation(plotter: Plotter) -> dict[str, str]:
+    navigation = {"action": "quit"}
+
+    def on_key(event: object) -> None:
+        key = str(getattr(event, "keypress", "")).lower()
+        actions = {
+            "n": "next_patient", "p": "previous_patient",
+            "s": "next_series", "a": "previous_series",
+            "q": "quit", "escape": "quit",
+        }
+        if key in actions:
+            navigation["action"] = actions[key]
+            plotter.break_interaction()
+
+    plotter.remove_callback("KeyPress")
+    plotter.add_callback("KeyPress", on_key, enable_picking=False)
+    return navigation
+
+
+def show_stage0_output(
+    patient_id, image_path, modality, seg_path, review_title="", navigation=False
+):
+    image = nib.as_closest_canonical(nib.load(str(image_path)))
+    segmentation = nib.as_closest_canonical(nib.load(str(seg_path)))
+    if segmentation.shape != image.shape or not np.allclose(segmentation.affine, image.affine, atol=1e-5):
+        segmentation = resample_from_to(segmentation, image, order=0)
+
+    image_xyz = np.asanyarray(image.dataobj).astype(np.float32)
+    segmentation_xyz = np.asanyarray(segmentation.dataobj).astype(np.int16)
+    image_zyx = np.transpose(image_xyz, (2, 1, 0))
+    segmentation_zyx = np.transpose(segmentation_xyz, (2, 1, 0))
+    spacing_xyz = spacing_xyz_from_aff(image.affine)
+    spacing_zyx = (spacing_xyz[2], spacing_xyz[1], spacing_xyz[0])
+
+    if modality == "CT":
+        display = np.clip(image_zyx, -450.0, 1200.0)
+        volume_actor = Volume(display).spacing(spacing_zyx).cmap("bone").alpha([0.0, 0.0, 0.04, 0.14])
+    else:
+        nonzero = image_zyx[image_zyx > 0]
+        lower = float(np.percentile(nonzero, 1.0)) if nonzero.size else 0.0
+        upper = float(np.percentile(nonzero, 99.5)) if nonzero.size else 1.0
+        scale = max(upper - lower, 1.0)
+        display = np.clip((image_zyx - lower) / scale, 0.0, 1.0)
+        display[image_zyx <= 0] = 0.0
+        volume_actor = Volume(display).spacing(spacing_zyx).cmap("gray").alpha([0.0, 0.0, 0.03, 0.12])
+
+    palette = [
+        "tomato", "deepskyblue", "gold", "orchid", "limegreen", "cyan",
+        "orange", "hotpink", "springgreen", "dodgerblue", "khaki", "salmon",
+        "turquoise", "magenta", "wheat", "steelblue", "plum",
+    ]
+    actors = [volume_actor]
+    detected = []
+    for index, (vertebra, label) in enumerate(STAGE0_VERTEBRA_LABELS.items()):
+        mask = segmentation_zyx == label
+        if not np.any(mask):
+            continue
+        surface = mask_to_surface(
+            mask,
+            palette[index % len(palette)],
+            0.85,
+            spacing_zyx,
+            smooth=modality == "MR",
+        )
+        if surface is not None:
+            actors.append(surface)
+        detected.append(vertebra)
+
+    actors.append(
+        Text2D(
+            f"{patient_id} | {modality} | Stage 0 vertebrae\n"
+            + " ".join(detected)
+            + (f"\n{review_title}" if review_title else ""),
+            pos="top-left",
+            s=0.8,
+        )
+    )
+    plotter = Plotter(
+        axes=1, bg="black", bg2="gray3", title=f"{patient_id} {modality} vertebrae"
+    )
+    state = attach_review_navigation(plotter) if navigation else {"action": "quit"}
+    try:
+        plotter.show(*actors, interactive=True)
+    finally:
+        plotter.close()
+    return state["action"]
 
 
 def resolve_gt_path(patient_id, gt_seg, root_dir):
@@ -103,10 +242,13 @@ def spacing_xyz_from_aff(aff):
     return (sx, sy, sz)
 
 
-def mask_to_surface(mask_zyx, color, alpha, spacing_zyx):
+def mask_to_surface(mask_zyx, color, alpha, spacing_zyx, smooth=False):
     if mask_zyx is None or not np.any(mask_zyx):
         return None
-    return Volume(mask_zyx.astype(np.uint8)).spacing(spacing_zyx).isosurface(0.5).c(color).alpha(alpha)
+    surface = Volume(mask_zyx.astype(np.uint8)).spacing(spacing_zyx).isosurface(0.5)
+    if smooth:
+        surface = surface.smooth(niter=10, pass_band=0.15)
+    return surface.c(color).alpha(alpha)
 
 
 def to_zyx(arr_xyz):
@@ -346,6 +488,28 @@ def run_batch(root_dir, ts_root):
 
 def main():
     args = parse_args()
+
+    if args.show_output:
+        if not args.patient_id:
+            raise ValueError("--show-output requires --patient-id.")
+        image_path, modality = resolve_patient_image(args.patient_id, args.root_dir)
+        seg_path = Path(args.root_dir) / args.patient_id / f"{args.patient_id}_seg-1.nii.gz"
+        if not seg_path.exists():
+            raise FileNotFoundError(f"Combined segmentation not found: {seg_path}")
+        show_stage0_output(args.patient_id, image_path, modality, seg_path)
+        return
+
+    if args.check_output:
+        if not args.patient_id:
+            raise ValueError("--check-output requires --patient-id.")
+        ts_dir = Path(args.ts_dir) if args.ts_dir else Path(args.ts_root) / args.patient_id
+        seg_path = Path(args.root_dir) / args.patient_id / f"{args.patient_id}_seg-1.nii.gz"
+        df = inspect_stage0_output(args.patient_id, ts_dir, seg_path=seg_path)
+        if df.empty:
+            raise RuntimeError(f"No vertebrae found for {args.patient_id}.")
+        print(df[["vertebra", "mask_voxels", "combined_voxels"]].to_string(index=False))
+        print(f"Detected vertebrae: {len(df)}")
+        return
 
     if args.show:
         if not args.patient_id and not args.gt_seg:

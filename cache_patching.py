@@ -1,29 +1,31 @@
 import argparse
+from pathlib import Path
 
 import numpy as np
 from vedo import Text2D, Volume, show
 
-from dataset_class import VertebraDataset
-from utils import DEFAULT_DATA_ROOT, VERTEBRA_LABELS, extract_centered_label_cube, load_img
+from dataset_class import VertebraDataset, resolve_dataset_root
+from utils import VERTEBRA_LABELS, extract_centered_label_cube, load_img
 
 def parse_args():
+    data_root = resolve_dataset_root()
     parser = argparse.ArgumentParser(description="Generate one vertebra patch and display it with vedo.")
     parser.add_argument(
         "--csv-path",
         type=str,
-        default="data/vertebra_dataset.csv",
+        default=str(data_root / "vertebra_dataset.csv"),
         help="Dataset CSV path.",
     )
     parser.add_argument(
         "--root-dir",
         type=str,
-        default=DEFAULT_DATA_ROOT,
+        default=str(data_root / "Spine-Mets-CT-SEG-Nifti"),
         help="Root directory containing patient CT/SEG NIfTI files.",
     )
     parser.add_argument(
         "--cache-dir",
         type=str,
-        default="data/vertebra_patch_cache",
+        default=str(data_root / "vertebra_patch_cache"),
         help="Directory to read/write cached .npy patches.",
     )
     parser.add_argument(

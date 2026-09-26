@@ -1,4 +1,4 @@
-STAGE_REGISTRY = {}
+STAGE_REGISTRY: dict[str, type["PipelineStage"]] = {}
 
 
 def register_stage(name):

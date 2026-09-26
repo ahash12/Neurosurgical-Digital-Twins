@@ -147,9 +147,13 @@ class SINSPipeline:
         return (context.seg == VERTEBRA_LABELS[str(vertebra).upper()]).any()
 
 
-def build_pipeline(model_path=None, cam_method="gradcam"):
+def build_pipeline(model_path=None, cam_method="gradcam", experimental_mri=False):
     cam = CAMExplainer(method=cam_method)
-    stage1 = Stage1FourClass(model_path or DEFAULT_STAGE1_MODEL, cam=cam)
+    stage1 = Stage1FourClass(
+        model_path or DEFAULT_STAGE1_MODEL,
+        cam=cam,
+        allow_unsupported_modality=experimental_mri,
+    )
     return SINSPipeline(stage1=stage1)
 
 
@@ -160,6 +164,11 @@ def parse_args():
     parser.add_argument("--model-path", type=str, default="", help="Stage1 checkpoint path.")
     parser.add_argument("--show-cam", action="store_true", help="Show every vertebra stage1 CAM over the original CT volume.")
     parser.add_argument("--cam-method", type=str, default="gradcam", choices=["gradcam", "gradcam++", "layercam"], help="CAM method.")
+    parser.add_argument(
+        "--experimental-mri-ct-models",
+        action="store_true",
+        help="Allow the CT-trained Stage 1 model on MRI for exploratory output only. Stage 3 remains CT-only.",
+    )
     return parser.parse_args()
 
 
@@ -167,7 +176,11 @@ def main():
     args = parse_args()
     patient_id = args.patient_id or input("Patient ID: ")
     context = PatientContext.load(patient_id, root_dir=args.root_dir, canonical=True)
-    pipeline = build_pipeline(model_path=args.model_path or None, cam_method=args.cam_method)
+    pipeline = build_pipeline(
+        model_path=args.model_path or None,
+        cam_method=args.cam_method,
+        experimental_mri=args.experimental_mri_ct_models,
+    )
     pipeline.run_patient(context, show_cam=args.show_cam)
 
 

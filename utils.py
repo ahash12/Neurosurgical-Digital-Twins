@@ -10,6 +10,10 @@ VERTEBRA_LABELS = {
 }
 INV_LABELS = {v: k for k, v in VERTEBRA_LABELS.items()}
 VERTEBRAE = list(VERTEBRA_LABELS.keys())
+STAGE0_VERTEBRA_LABELS = {
+    **VERTEBRA_LABELS,
+    **{f"C{index}": 17 + index for index in range(1, 8)},
+}
 
 DEFAULT_DATA_ROOT = "../../datasets/radiel/Spine-Mets-CT-SEG-Nifti"
 
