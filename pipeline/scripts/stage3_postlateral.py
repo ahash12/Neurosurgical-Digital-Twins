@@ -304,7 +304,10 @@ def analyze_posterolateral_from_ijk(
     lesion_high_hu,
     threshold_mode=DEFAULT_THRESHOLD_MODE,
     threshold_meta=None,
+    canal_center=None,
 ):
+    """``canal_center`` (world xyz) skips the CT canal search, e.g. when the
+    canal was already located on axial MRI slices."""
     if ijk.size == 0:
         return None
 
@@ -329,8 +332,12 @@ def analyze_posterolateral_from_ijk(
         [centroid_x, centroid_y, float(np.median(xyz[:, 2]))], dtype=np.float64
     )
 
-    stage2_geom = analyze_height_geometry(ijk, aff)
-    if stage2_geom is not None:
+    stage2_geom = analyze_height_geometry(ijk, aff) if canal_center is None else None
+    if canal_center is not None:
+        center_x = float(canal_center[0])
+        center_y = float(canal_center[1])
+        reference_center = np.asarray(canal_center, dtype=np.float64)
+    elif stage2_geom is not None:
         center_x = float(stage2_geom["canal"]["center_world"][0])
         center_y = float(stage2_geom["canal"]["center_world"][1])
         reference_center = np.array(
@@ -405,7 +412,7 @@ def analyze_posterolateral_from_ijk(
         "center_y": center_y,
         "centroid_x": centroid_x,
         "centroid_y": centroid_y,
-        "used_canal_center": bool(stage2_geom is not None),
+        "used_canal_center": bool(stage2_geom is not None or canal_center is not None),
         "left_count": left_count,
         "right_count": right_count,
         "total_posterior_abnormal": total,
@@ -439,6 +446,7 @@ def posterolateral_score_from_ijk(
     lesion_high_hu,
     threshold_mode=DEFAULT_THRESHOLD_MODE,
     threshold_meta=None,
+    canal_center=None,
 ):
     result = analyze_posterolateral_from_ijk(
         ct,
@@ -448,6 +456,7 @@ def posterolateral_score_from_ijk(
         lesion_high_hu=lesion_high_hu,
         threshold_mode=threshold_mode,
         threshold_meta=threshold_meta,
+        canal_center=canal_center,
     )
     if result is None:
         return 0

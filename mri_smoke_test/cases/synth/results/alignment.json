@@ -1,0 +1,18 @@
+{
+  "coronal_max_dev_mm": 0.0,
+  "sagittal_max_dev_mm": 5.934759577903261,
+  "has_subluxation": 1,
+  "has_curve_deviation": 0,
+  "alignment_score": 4,
+  "n_vertebrae_found": 8,
+  "flags": [
+    {
+      "label_id": 11,
+      "vertebra": "T11",
+      "disp_mm": 9.224999755620956,
+      "dx_mm": 0.0,
+      "dy_mm": 9.224999755620956
+    }
+  ],
+  "alignment_measured": true
+}

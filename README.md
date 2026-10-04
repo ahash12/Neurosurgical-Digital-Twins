@@ -117,6 +117,30 @@ CAM methods:
 - layercam
 
 
+## MRI Pipeline (step by step)
+
+The MRI pipeline lives in `sins_steps/`. Each SINS step is its own package that can be run and tested
+separately, then run together. See **[sins_steps/README.md](sins_steps/README.md)** for details.
+
+```bash
+python -m sins_steps.prepare_case --source "../trial_b_deid'd/pt-00" --case-id pt-00   # case folder
+python -m sins_steps.step0_segmentation   --case output/mri_cases/pt-00 --device mps   # TotalSegmentator
+python -m sins_steps.step1_location       --case output/mri_cases/pt-00                # Stage 1 + location + Grad-CAM
+python -m sins_steps.step2_subluxation    --case output/mri_cases/pt-00
+python -m sins_steps.step3_posterolateral --case output/mri_cases/pt-00
+python -m sins_steps.step4_collapse       --case output/mri_cases/pt-00
+python -m sins_steps.step5_alignment      --case output/mri_cases/pt-00
+
+python -m sins_steps --case output/mri_cases/pt-00 --device mps    # all steps + SINS
+python -m sins_steps.run_tests                                     # every step's known-answer test
+```
+
+`prepare_case` builds `output/mri_cases/<case>/` with `sagittal/T1`, `sagittal/T2`, `axial/T1` and `axial/T2`.
+Series exported without sequence names get an empty `weighting` in `series_labels.csv`. Fill it in
+(`T1`, `T2`, `STIR`, `T1_POST`, `OTHER`) using `contact_sheet.png`, then re-run.
+The older commands `pipeline.scripts.build_mri_case`, `stage0_segment_mri` and `sins_mri` still work
+and now run the step packages.
+
 ## Validation
 
 Stage 0 validation:

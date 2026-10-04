@@ -101,20 +101,8 @@ def local_subluxation_flags(levels, x, y, z, thresh_mm):
     return flags
 
 
-def compute_patient_alignment(seg_path, translation_thresh_mm, scoliosis_max_dev_mm, kyphosis_max_dev_mm):
-    seg, aff = load_seg(seg_path)
-    label_ijk = build_label_ijk_map(seg)
-
-    pts = []
-    for lab in range(1, 18):
-        ijk = label_ijk.get(lab, np.empty((0, 3), dtype=np.int64))
-        c = centroid_world_from_ijk(ijk, aff)
-        if c is None:
-            continue
-        # canonical axis assumption after as_closest_canonical:
-        # x left right, y posterior anterior, z inferior superior or superior inferior depending on affine sign
-        pts.append((lab, c[0], c[1], c[2]))
-
+def alignment_from_points(pts, translation_thresh_mm, scoliosis_max_dev_mm, kyphosis_max_dev_mm):
+    """Score alignment from vertebral centroids [(label, x, y, z), ...] in world mm."""
     if len(pts) < 5:
         return None
 
@@ -157,6 +145,26 @@ def compute_patient_alignment(seg_path, translation_thresh_mm, scoliosis_max_dev
     }
 
     return summary, flags
+
+
+def centroid_points_from_seg(seg, aff):
+    label_ijk = build_label_ijk_map(seg)
+    pts = []
+    for lab in range(1, 18):
+        ijk = label_ijk.get(lab, np.empty((0, 3), dtype=np.int64))
+        c = centroid_world_from_ijk(ijk, aff)
+        if c is None:
+            continue
+        # canonical axis assumption after as_closest_canonical:
+        # x left right, y posterior anterior, z inferior superior or superior inferior depending on affine sign
+        pts.append((lab, c[0], c[1], c[2]))
+    return pts
+
+
+def compute_patient_alignment(seg_path, translation_thresh_mm, scoliosis_max_dev_mm, kyphosis_max_dev_mm):
+    seg, aff = load_seg(seg_path)
+    pts = centroid_points_from_seg(seg, aff)
+    return alignment_from_points(pts, translation_thresh_mm, scoliosis_max_dev_mm, kyphosis_max_dev_mm)
 
 
 def analyze_patient_alignment_geometry(seg_path, translation_thresh_mm=6.0, scoliosis_max_dev_mm=10.0, kyphosis_max_dev_mm=10.0):
